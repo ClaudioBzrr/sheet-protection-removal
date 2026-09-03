@@ -1,57 +1,68 @@
 import * as fs from 'fs';
 import * as path from 'path';
-import AdmZip from 'adm-zip';
+import { unlockFile } from './lib.js';
+import { runTui } from './tui.js';
 
-const [, , inputFile] = process.argv;
+const args = process.argv.slice(2);
 
-if (!inputFile) {
-    console.log('Usage: node dist/index.js <input.xlsx>');
-    process.exit(1);
+function printUsage(): void {
+    console.log('Uso:');
+    console.log('  sheet-unlock [arquivo.xlsx] [--cli]     abre a TUI, ou modo CLI se arquivo + --cli');
+    console.log('  sheet-unlock arquivo.xlsx -o saida.xlsx  modo CLI direto');
 }
 
-if (!fs.existsSync(inputFile)) {
-    console.error('File does not exist:', inputFile);
-    process.exit(1);
-}
+async function main(): Promise<void> {
+    const flags = args.filter((a) => a.startsWith('-'));
+    const positionals = args.filter((a) => !a.startsWith('-'));
+    const wantsCli = flags.includes('--cli') || flags.includes('-o') || flags.includes('--output');
 
-const inputDir = path.dirname(inputFile);
-const inputBase = path.basename(inputFile);
-const outputFile = path.join(inputDir, 'unprotected_' + inputBase);
+    // Sem arquivo -> sempre TUI
+    if (positionals.length === 0 && !wantsCli) {
+        await runTui();
+        return;
+    }
 
-function removeSheetProtection() {
-    try {
-        const zip = new AdmZip(inputFile);
-        const worksheetEntries = zip.getEntries().filter(entry =>
-            entry.entryName.startsWith('xl/worksheets/') &&
-            entry.entryName.endsWith('.xml')
-        );
+    const inputFile = positionals[0];
 
-        console.log(`Found ${worksheetEntries.length} worksheet files`);
-
-        for (const entry of worksheetEntries) {
-            const xmlContent = entry.getData().toString('utf8');
-
-            const originalContent = xmlContent;
-            const newXmlContent = xmlContent.replace(
-                /<sheetProtection[^>]*\/>|<sheetProtection[^>]*>[\s\S]*?<\/sheetProtection>/gi,
-                ''
-            );
-
-            if (newXmlContent !== originalContent) {
-                console.log(`Removing sheet protection from ${entry.entryName}`);
-                zip.updateFile(entry.entryName, Buffer.from(newXmlContent, 'utf8'));
-            }
+    // Com arquivo mas sem --cli -> TUI já com arquivo pré-selecionado
+    if (inputFile && !wantsCli) {
+        if (!fs.existsSync(inputFile)) {
+            console.error('Arquivo não encontrado:', inputFile);
+            process.exit(1);
         }
+        await runTui(inputFile);
+        return;
+    }
 
-        zip.writeZip(outputFile);
+    // ---- modo CLI (compatível com versão anterior + -o) ----
+    if (!inputFile) {
+        printUsage();
+        process.exit(1);
+    }
+    if (!fs.existsSync(inputFile)) {
+        console.error('Arquivo não encontrado:', inputFile);
+        process.exit(1);
+    }
 
-        console.log('Sheet protection removed successfully!');
-        console.log(`Output file: ${outputFile}`);
+    let outputFile: string;
+    const oIdx = args.findIndex((a) => a === '-o' || a === '--output');
+    if (oIdx !== -1 && args[oIdx + 1]) {
+        outputFile = args[oIdx + 1];
+    } else {
+        const dir = path.dirname(inputFile);
+        outputFile = path.join(dir, 'unprotected_' + path.basename(inputFile));
+    }
 
-    } catch (error) {
-        console.error('Error:', error instanceof Error ? error.message : String(error));
+    try {
+        const r = unlockFile(inputFile, outputFile);
+        console.log(`Encontradas ${r.sheetsTotal} planilhas, ${r.sheetsUnlocked} desbloqueadas.`);
+        if (r.workbookUnlocked) console.log('Proteção da pasta de trabalho removida.');
+        console.log('Pronto!');
+        console.log(`Saída: ${r.outputFile}`);
+    } catch (e) {
+        console.error('Erro:', e instanceof Error ? e.message : String(e));
         process.exit(1);
     }
 }
 
-removeSheetProtection();
+main();
